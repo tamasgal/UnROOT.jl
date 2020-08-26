@@ -191,4 +191,7 @@ end
     @test 2 == length(keys(rootfile))
     @test [1.0, 2.0, 3.0] == array(rootfile, "TreeD/nums")
     @test [1.0, 2.0, 3.0] == array(rootfile, "TreeF/nums")
+
+    # Compression
+    rootfile = ROOTFile(joinpath(SAMPLES_DIR, "issue10", "test_comp.root"))
 end

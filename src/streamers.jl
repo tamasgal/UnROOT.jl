@@ -78,14 +78,19 @@ function Streamers(io)
     tkey = unpack(io, TKey)
 
     if iscompressed(tkey)
-        @debug "Compressed stream at $(start)"
         seekstart(io, tkey)
         compression_header = unpack(io, CompressionHeader)
-        if String(compression_header.algo) != "ZL"
-            error("Unsupported compression type '$(String(compression_header.algo))'")
-        end
+        compression_algo = String(compression_header.algo)
+        @debug "Compressed stream ($compression_algo) at $(start)"
+        @show compression_header
 
-        stream = IOBuffer(read(ZlibDecompressorStream(io), tkey.fObjlen))
+        if compression_algo == "L4"
+            println("Skipping L4 stream with $(tkey.fObjlen) bytes")
+            # stream = IOBuffer(read(LZ4SafeDecompressorStream(io; block_size=tkey.fObjlen), tkey.fObjlen))
+        end
+        if compression_algo == "ZL"
+            stream = IOBuffer(read(ZlibDecompressorStream(io), tkey.fObjlen))
+        end
     else
         @debug "Unompressed stream at $(start)"
         stream = io

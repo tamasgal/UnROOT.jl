@@ -194,6 +194,17 @@ end
     u3::UInt8
 end
 
+function DecompressorStream(h::CompressionHeader; block_size=nothing)
+    algo = String(h.algo)
+    if algo == "ZL"
+        return ZlibDecompressorStream
+    end
+    if algo == "L4"
+        return LZ4SafeDecompressorStream
+    end
+    error("Unsupported compression type '$(algo)'")
+end
+
 
 # Built-in types
 function THashList end
