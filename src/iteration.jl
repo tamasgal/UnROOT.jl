@@ -29,10 +29,8 @@ function array(f::ROOTFile, branch; raw=false)
     if raw
         return rawdata, rawoffsets
     end
-    leaf = first(branch.fLeaves.elements)
-    jagt = JaggType(leaf)
-    T = eltype(branch) 
-    interped_data(rawdata, rawoffsets, branch, jagt, T)
+    T, jagt = interp_jaggT(branch)
+    interped_data(rawdata, rawoffsets, jagt, T)
 end
 
 """
@@ -41,16 +39,15 @@ Reads an array from ith basket of a branch. Set `raw=true` to return raw data an
 """
 basketarray(f::ROOTFile, path::AbstractString, ithbasket) = basketarray(f, f[path], ithbasket)
 
-@memoize LRU(; maxsize=1 * 1024^3, by=x->sum(length, x)) function basketarray(f::ROOTFile, branch, ithbasket)
+# @memoize LRU(; maxsize=1 * 1024^3, by=x->sum(length, x)) function basketarray(f::ROOTFile, branch, ithbasket)
+function basketarray(f::ROOTFile, branch, ithbasket)
     ismissing(branch) && error("No branch found at $path")
     length(branch.fLeaves.elements) > 1 && error(
             "Branches with multiple leaves are not supported yet. Try reading with `array(...; raw=true)`.")
 
     rawdata, rawoffsets = readbasket(f, branch, ithbasket)
-    leaf = first(branch.fLeaves.elements)
-    jagt = JaggType(leaf)
-    T = eltype(branch)
-    interped_data(rawdata, rawoffsets, branch, jagt, T)
+    T, jagt = interp_jaggT(branch)
+    interped_data(rawdata, rawoffsets, jagt, T)
 end
 
 # function barrior to make getting individual index faster
@@ -87,9 +84,7 @@ mutable struct LazyBranch{T, J} <: AbstractVector{T}
     buffer::Vector{T}
 
     function LazyBranch(f::ROOTFile, b::Union{TBranch, TBranchElement})
-        T = eltype(b)
-        J = JaggType(first(b.fLeaves.elements))
-        max_len = maximum(diff(b.fBasketEntry))
+        T, J = interp_jaggT(b)
         # we don't know how to deal with multiple leaves yet
         new{T, J}(f, b, length(b), b.fBasketEntry, -1, T[])
     end

@@ -70,7 +70,7 @@ function Base.show(io::IO, f::ROOTFile)
     print(io, typeof(f))
     print(io, " with $n_entries $entries_suffix ")
     println(io, "and $n_streamers $streamers_suffix.")
-    print_tree(f)
+    print_tree(io, f)
 end
 
 
@@ -99,8 +99,8 @@ function Base.getindex(f::ROOTFile, s::AbstractString)
     S
 end
 
-@memoize LRU(maxsize = 2000) function _getindex(f::ROOTFile, s)
-# function _getindex(f::ROOTFile, s)
+# @memoize LRU(maxsize = 2000) function _getindex(f::ROOTFile, s)
+function _getindex(f::ROOTFile, s)
     if '/' ∈ s
         @debug "Splitting path '$s' and getting items recursively"
         paths = split(s, '/')
@@ -147,14 +147,15 @@ function Base.getindex(t::TTree, s::Vector{T}) where {T<:AbstractString}
     [t[n] for n in s]
 end
 
-function interped_data(rawdata, rawoffsets, branch, ::Type{J}, ::Type{T}) where {J<:JaggType, T}
+reinterpret(vt::Type{Vector{T}}, data::AbstractVector{UInt8}) where T <: Union{AbstractFloat, Integer} = reinterpret(T, data)
+
+function interped_data(rawdata, rawoffsets, ::Type{J}, ::Type{T}) where {J<:JaggType, T}
     # there are two possibility, one is the leaf is just normal leaf but the title has "[...]" in it
     # magic offsets, seems to be common for a lot of types, see auto.py in uproot3
     # only needs when the jaggedness comes from TLeafElements, not needed when
     # the jaggedness comes from having "[]" in TLeaf's title
     # the other is where we need to auto detector T bsaed on class name
     # we want the fundamental type as `reinterpret` will create vector
-    elT = eltype(T)
     if J !== Nojagg
         jagg_offset = J===Offsetjagg ? 10 : 0
 
@@ -164,7 +165,7 @@ function interped_data(rawdata, rawoffsets, branch, ::Type{J}, ::Type{T}) where 
         # Say your real data is Int32 and you see 8 bytes after indexing, then this event has [num1, num2] as real data
         @views [
                 ntoh.(reinterpret(
-                                  elT, rawdata[ (rawoffsets[i]+jagg_offset+1):rawoffsets[i+1] ]
+                                  T, rawdata[ (rawoffsets[i]+jagg_offset+1):rawoffsets[i+1] ]
                                  )) for i in 1:(length(rawoffsets) - 1)
                ]
     else # the branch is not jagged
@@ -182,40 +183,62 @@ function _normalize_ftype(fType)
     end
 end
 
-@memoize LRU(;maxsize=10^3) function interp_jaggT(branch, leaf)
+const _leaftypeconstlookup = Dict(
+                             Const.kBool   => Bool  ,
+                             Const.kChar   => Int8  ,
+                             Const.kUChar  => UInt8 ,
+                             Const.kShort  => Int16 ,
+                             Const.kUShort => UInt16,
+                             Const.kInt    => Int32 ,
+                             Const.kBits   => UInt32,
+                             Const.kUInt   => UInt32,
+                             Const.kCounter=>UInt32 ,
+                             Const.kLong => Int64   ,
+                             Const.kLong64 =>  Int64,
+                             Const.kULong =>  UInt64,
+                             Const.kULong64 =>UInt64,
+                             Const.kDouble32 => Float32,
+                             Const.kDouble =>   Float64,
+                            )
+function interp_jaggT(branch)
+# @memoize LRU(;maxsize=10^3) function interp_jaggT(branch, leaf)
+    leaf = first(branch.fLeaves.elements)
+    _type = Nothing
+    _jaggtype = JaggType(leaf)
     if hasproperty(branch, :fClassName)
         classname = branch.fClassName # the C++ class name, such as "vector<int>"
+        try
+            # this will call a customize routine if defined by user
+            return interp_jaggT(branch, eval(Symbol(classname)))
+        catch
+        end
         m = match(r"vector<(.*)>", classname)
         if m!==nothing
             elname = m[1]
             elname = endswith(elname, "_t") ? lowercase(chop(elname; tail=2)) : elname  # Double_t -> double
             try
-                elname == "bool" && return Bool #Cbool doesn't exist
-                elname == "unsigned int" && return UInt32 #Cunsigned doesn't exist
-                elname == "unsigned char" && return Char #Cunsigned doesn't exist
-                getfield(Base, Symbol(:C, elname))
+                _type = elname == "bool" ?          Bool : _type #Cbool doesn't exist
+                _type = elname == "unsigned int" ?  UInt32 : _type #Cunsigned doesn't exist
+                _type = elname == "unsigned char" ? Char   : _type
+                _type = getfield(Base, Symbol(:C, elname))
+
+                # we know it's a vector because we saw vector<>
+                _type = Vector{_type}
             catch
                 error("Cannot convert element of $elname to a native Julia type")
             end
         # Try to interpret by leaf type
         else
             leaftype = _normalize_ftype(leaf.fType)
-            leaftype == Const.kBool && return Bool
-            leaftype == Const.kChar && return Int8
-            leaftype == Const.kUChar && return UInt8
-            leaftype == Const.kShort && return Int16
-            leaftype == Const.kUShort && return UInt16
-            leaftype == Const.kInt && return Int32
-            (leaftype in [Const.kBits, Const.kUInt, Const.kCounter]) && return UInt32
-            (leaftype in [Const.kLong, Const.kLong64]) && return Int64
-            (leaftype in [Const.kULong, Const.kULong64]) && return UInt64
-            leaftype == Const.kDouble32 && return Float32
-            leaftype == Const.kDouble && return Float64
-            error("Cannot interpret type.")
+            _type = get(_leaftypeconstlookup, leaftype, nothing)
+            isnothing(_type) && error("Cannot interpret type.")
         end
     else
-        primitivetype(leaf)
+        _type = primitivetype(leaf)
+        _type = _jaggtype === Nojagg ? _type : Vector{_type}
     end
+
+    return _type, _jaggtype
 end
 
 
@@ -246,7 +269,8 @@ end
 # 3GB cache for baskets
 readbasket(f::ROOTFile, branch, ith) = readbasketseek(f, branch, branch.fBasketSeek[ith])
 
-@memoize LRU(; maxsize=3 * 1024^3, by=x -> sum(length, x)) function readbasketseek(
+# @memoize LRU(; maxsize=3 * 1024^3, by=x -> sum(length, x)) function readbasketseek(
+function readbasketseek(
     f::ROOTFile, branch, seek_pos
 )::Tuple{Vector{UInt8},Vector{Int32},Int32}  # just being extra careful
     lock(f)
